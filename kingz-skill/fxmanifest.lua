@@ -11,13 +11,18 @@ shared_scripts {
     'config.lua'
 }
 
+server_scripts {
+    '@oxmysql/lib/MySQL.lua',
+    'mysql-compat.lua',
+    'server/main.lua'
+}
+
 client_script 'client/main.lua'
-server_script 'server/main.lua'
 
 dependencies {
     'qb-core',
-    'oxmysql',  -- For database interactions
-    'ox_lib'    -- For enhanced UI
+    'oxmysql',
+    'ox_lib'
 }
 
 lua54 'yes'

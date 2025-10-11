@@ -1,5 +1,83 @@
 local QBCore = exports['qb-core']:GetCoreObject()
-local MySQL = exports.oxmysql  -- Explicitly import oxmysql to fix 'MySQL nil' error
+-- No need to explicitly import oxmysql as we're using the compatibility layer
+
+-- Safe query function to handle potential non-string queries
+local function safeQuery(query, params, callback)
+    if type(query) ~= 'string' then
+        print("^1[kingz-skill] Error: Invalid query type: " .. type(query) .. "^7")
+        print("^1[kingz-skill] Value: " .. tostring(query) .. "^7")
+        if callback then callback({}) end
+        return {}
+    end
+    
+    if callback then
+        return MySQL.Async.fetchAll(query, params, callback)
+    else
+        return MySQL.Sync.fetchAll(query, params)
+    end
+end
+
+-- Emergency fix for kingz-skill SQL error with Citizen IDs
+Citizen.CreateThread(function()
+    Citizen.Wait(1000) -- Wait for resources to initialize
+    
+    -- Create a global protection for MySQL functions
+    if MySQL then
+        -- Store original functions
+        local originalSyncFetchAll = MySQL.Sync.fetchAll
+        local originalAsyncExecute = MySQL.Async.execute
+        local originalSyncExecute = MySQL.Sync.execute
+        local originalAsyncFetchAll = MySQL.Async.fetchAll
+        
+        -- Override MySQL.Sync.fetchAll with protection
+        MySQL.Sync.fetchAll = function(query, params)
+            if type(query) ~= 'string' then
+                print("^1[MYSQL ERROR PREVENTED] Invalid query type: " .. type(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Value: " .. tostring(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Called from: " .. debug.traceback() .. "^7")
+                return {} -- Return empty result instead of crashing
+            end
+            return originalSyncFetchAll(query, params)
+        end
+        
+        -- Override MySQL.Async.execute with protection
+        MySQL.Async.execute = function(query, params, cb)
+            if type(query) ~= 'string' then
+                print("^1[MYSQL ERROR PREVENTED] Invalid query type: " .. type(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Value: " .. tostring(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Called from: " .. debug.traceback() .. "^7")
+                if cb then cb(0) end
+                return
+            end
+            return originalAsyncExecute(query, params, cb)
+        end
+        
+        -- Override MySQL.Sync.execute with protection
+        MySQL.Sync.execute = function(query, params)
+            if type(query) ~= 'string' then
+                print("^1[MYSQL ERROR PREVENTED] Invalid query type: " .. type(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Value: " .. tostring(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Called from: " .. debug.traceback() .. "^7")
+                return 0 -- Return 0 affected rows instead of crashing
+            end
+            return originalSyncExecute(query, params)
+        end
+        
+        -- Override MySQL.Async.fetchAll with protection
+        MySQL.Async.fetchAll = function(query, params, cb)
+            if type(query) ~= 'string' then
+                print("^1[MYSQL ERROR PREVENTED] Invalid query type: " .. type(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Value: " .. tostring(query) .. "^7")
+                print("^1[MYSQL ERROR PREVENTED] Called from: " .. debug.traceback() .. "^7")
+                if cb then cb({}) end
+                return
+            end
+            return originalAsyncFetchAll(query, params, cb)
+        end
+        
+        print("^2[kingz-coffee] Applied global MySQL error prevention^7")
+    end
+end)
 
 -- Debug function to print tables
 local function dumpTable(table, indent)
@@ -174,78 +252,21 @@ QBCore.Functions.CreateCallback('kingz-skills:getPlayerData', function(source, c
     cb({skills = skills, rep = rep})
 end)
 
--- Update Skill XP
-RegisterServerEvent('kingz-skills:updateSkill')
-AddEventHandler('kingz-skills:updateSkill', function(skillName, xpAmount)
+-- Handle events from other resources
+RegisterServerEvent('kingz-skill:updateSkill')
+AddEventHandler('kingz-skill:updateSkill', function(skillName, xpAmount)
     local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
-    if not Player or not Config.Skills[skillName] then return end
-    
-    print("^2[kingz-skills] Adding " .. xpAmount .. " XP to " .. skillName .. " for player " .. src .. "^7")
-    
-    -- Apply job bonus
-    local jobBonus = GetJobBonus(Player, skillName)
-    xpAmount = math.floor(xpAmount * jobBonus)
-    
-    -- Update last used timestamp for this skill
-    local lastUsed = Player.PlayerData.metadata.lastSkillUse or {}
-    if type(lastUsed) == "string" then
-        lastUsed = json.decode(lastUsed) or {}
-    end
-    
-    lastUsed[skillName] = os.time()
-    Player.Functions.SetMetaData('lastSkillUse', lastUsed)
-    
-    -- Ensure skills is a table
-    local skills = Player.PlayerData.skills
-    if type(skills) == "string" then
-        local success, result = pcall(function() return json.decode(skills) end)
-        if success and type(result) == "table" then
-            skills = result
-        else
-            skills = {}
-        end
-    end
-    
-    -- Initialize if not exists
-    if type(skills) ~= "table" then skills = {} end
-    skills[skillName] = skills[skillName] or {xp = 0, level = 1}
-    
-    -- Apply rep bonus if applicable
-    local repBonus = Config.RepBonuses[skillName]
-    if repBonus then
-        local rep = Player.PlayerData.reputation
-        if type(rep) == "string" then
-            local success, result = pcall(function() return json.decode(rep) end)
-            if success and type(result) == "table" then
-                rep = result
-            else
-                rep = {}
-            end
-        end
-        
-        local repValue = rep[repBonus.repCategory] or 0
-        if repValue > 50 then
-            xpAmount = math.floor(xpAmount * repBonus.bonusMultiplier)
-        end
-    end
-    
-    skills[skillName].xp = skills[skillName].xp + xpAmount
-    local threshold = Config.Skills[skillName].levelThreshold * skills[skillName].level
-    if skills[skillName].xp >= threshold and skills[skillName].level < Config.Skills[skillName].maxLevel then
-        skills[skillName].level = skills[skillName].level + 1
-        skills[skillName].xp = 0  -- Reset XP for next level
-        
-        -- Send notification to client
-        TriggerClientEvent('kingz-skills:client:skillLevelUp', src, skillName, skills[skillName].level)
-    end
-    
-    Player.PlayerData.skills = skills
-    SavePlayerData(Player)
-    
-    -- Force update client data
-    TriggerClientEvent('QBCore:Player:SetPlayerData', src, Player.PlayerData)
+    print("^2[kingz-skill] Received updateSkill event: " .. skillName .. ", " .. xpAmount .. " for player " .. src .. "^7")
+    TriggerEvent('kingz-skills:updateSkill', src, skillName, xpAmount)
 end)
+
+RegisterServerEvent('kingz-skill:updateRep')
+AddEventHandler('kingz-skill:updateRep', function(repCategory, amount)
+    local src = source
+    print("^2[kingz-skill] Received updateRep event: " .. repCategory .. ", " .. amount .. " for player " .. src .. "^7")
+    TriggerEvent('kingz-skills:updateRep', src, repCategory, amount)
+end)
+
 
 -- Update Reputation
 RegisterServerEvent('kingz-skills:updateRep')
@@ -718,43 +739,44 @@ AddEventHandler('QBCore:Server:PlayerLoaded', function(Player)
     end
     
     -- Try to load from database
-    MySQL.single('SELECT skills, reputation FROM players WHERE citizenid = ?', {Player.PlayerData.citizenid}, function(result)
-        if result then
-            if result.skills and result.skills ~= '{}' and result.skills ~= 'null' then
-                local success, dbSkills = pcall(function() return json.decode(result.skills) end)
-                if success and type(dbSkills) == 'table' then
-                    -- Merge with default skills (to ensure new skills are added)
-                    for skillName, skillData in pairs(dbSkills) do
-                        skills[skillName] = skillData
-                    end
-                end
-            end
-            
-            if result.reputation and result.reputation ~= '{}' and result.reputation ~= 'null' then
-                local success, dbRep = pcall(function() return json.decode(result.reputation) end)
-                if success and type(dbRep) == 'table' then
-                    -- Merge with default rep (to ensure new rep categories are added)
-                    for repName, repValue in pairs(dbRep) do
-                        rep[repName] = repValue
-                    end
+MySQL.Async.fetchAll('SELECT skills, reputation FROM players WHERE citizenid = ?', {Player.PlayerData.citizenid}, function(result)
+    if result and result[1] then
+        local row = result[1]
+        if row.skills and row.skills ~= '{}' and row.skills ~= 'null' then
+            local success, dbSkills = pcall(function() return json.decode(row.skills) end)
+            if success and type(dbSkills) == 'table' then
+                -- Merge with default skills (to ensure new skills are added)
+                for skillName, skillData in pairs(dbSkills) do
+                    skills[skillName] = skillData
                 end
             end
         end
         
-        -- Set the player data
-        Player.PlayerData.skills = skills
-        Player.PlayerData.reputation = rep
-        
-        -- Debug output
-        print("^2[kingz-skills] Player loaded with data:^7")
-        print("^3Skills:^7")
-        dumpTable(skills)
-        print("^3Reputation:^7")
-        dumpTable(rep)
-        
-        -- Save to ensure database is updated with any new skills/rep
-        SavePlayerData(Player)
-    end)
+        if row.reputation and row.reputation ~= '{}' and row.reputation ~= 'null' then
+            local success, dbRep = pcall(function() return json.decode(row.reputation) end)
+            if success and type(dbRep) == 'table' then
+                -- Merge with default rep (to ensure new rep categories are added)
+                for repName, repValue in pairs(dbRep) do
+                    rep[repName] = repValue
+                end
+            end
+        end
+    end
+    
+    -- Set the player data
+    Player.PlayerData.skills = skills
+    Player.PlayerData.reputation = rep
+    
+    -- Debug output
+    print("^2[kingz-skills] Player loaded with data:^7")
+    print("^3Skills:^7")
+    dumpTable(skills)
+    print("^3Reputation:^7")
+    dumpTable(rep)
+    
+    -- Save to ensure database is updated with any new skills/rep
+    SavePlayerData(Player)
+   end)
 end)
 
 -- Add a command to reset skills (for testing)
@@ -907,3 +929,75 @@ end)
 QBCore.Functions.CreateCallback('kingz-skills:getAllReputationEffects', function(source, cb)
     cb(exports['kingz-skills']:GetAllReputationEffects(source))
 end)
+
+-- Export functions for other resources to use
+exports('getSkillLevel', function(source, skillName)
+    local Player = QBCore.Functions.GetPlayer(source)
+    if not Player then return 0 end
+    
+    -- Ensure skills is a table
+    local skills = Player.PlayerData.skills
+    if type(skills) == "string" then
+        local success, result = pcall(function() return json.decode(skills) end)
+        if success and type(result) == "table" then
+            skills = result
+        else
+            skills = {}
+        end
+    end
+    
+    -- Return skill level or default to 0
+    if type(skills) == "table" and skills[skillName] and skills[skillName].level then
+        return skills[skillName].level
+    else
+        return 0
+    end
+end)
+
+exports('hasPerk', function(source, skillName, perkLevel)
+    local Player = QBCore.Functions.GetPlayer(source)
+    if not Player then return false end
+    
+    -- Ensure skills is a table
+    local skills = Player.PlayerData.skills
+    if type(skills) == "string" then
+        local success, result = pcall(function() return json.decode(skills) end)
+        if success and type(result) == "table" then
+            skills = result
+        else
+            skills = {}
+        end
+    end
+    
+    -- Check if player has the required skill level for the perk
+    if type(skills) == "table" and skills[skillName] and skills[skillName].level >= perkLevel then
+        return true
+    else
+        return false
+    end
+end)
+
+exports('updateSkill', function(source, skillName, xpAmount)
+    TriggerEvent('kingz-skills:updateSkill', source, skillName, xpAmount)
+end)
+
+exports('updateRep', function(source, repCategory, amount)
+    TriggerEvent('kingz-skills:updateRep', source, repCategory, amount)
+end)
+
+-- Handle events from other resources
+RegisterServerEvent('kingz-skill:updateSkill')
+AddEventHandler('kingz-skill:updateSkill', function(skillName, xpAmount)
+    local src = source
+    print("^2[kingz-skill] Received updateSkill event: " .. skillName .. ", " .. xpAmount .. " for player " .. src .. "^7")
+    TriggerEvent('kingz-skills:updateSkill', src, skillName, xpAmount)
+end)
+
+RegisterServerEvent('kingz-skill:updateRep')
+AddEventHandler('kingz-skill:updateRep', function(repCategory, amount)
+    local src = source
+    print("^2[kingz-skill] Received updateRep event: " .. repCategory .. ", " .. amount .. " for player " .. src .. "^7")
+    TriggerEvent('kingz-skills:updateRep', src, repCategory, amount)
+end)
+
+print("^2[kingz-skill] Exports registered: getSkillLevel, hasPerk, updateSkill, updateRep^7")
